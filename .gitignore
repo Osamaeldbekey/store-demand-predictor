@@ -49,3 +49,12 @@ desktop.ini
 *.parquet
 *.zip
 
+# ===========================================================================
+# Deployment exceptions — artifacts deliberately shipped so a hosted
+# deployment can serve real data without running the Kaggle pipeline.
+# These MUST come last: git applies the final matching rule, so the
+# negations have to follow the "safety net" above to take effect.
+# ===========================================================================
+!models/lgbm_v1.joblib
+!data/processed/features.parquet
+
