@@ -110,6 +110,6 @@ if __name__ == "__main__":
     print_tree()
     print("\nDone. Next steps:")
     print("  1. git init && git add -A && git commit -m 'chore: scaffold repo structure'")
-    print("  2. pip install -r requirements.txt")
+    print("  2. pip install -r requirements-dev.txt  (runtime + tests/EDA/Kaggle)")
     print("  3. Download the Kaggle dataset into data/raw/ (see README)")
     print(f"\nPython: {sys.version.split()[0]}")

@@ -37,9 +37,13 @@ holiday features and forecasting without them is measurably biased (see
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt  # runtime + tests, EDA and the Kaggle CLI
 python scripts/init_repo.py          # idempotent scaffold
 ```
+
+`requirements.txt` is the runtime set that the deployed dashboard installs;
+`requirements-dev.txt` layers the development extras (pytest, notebooks, the
+Kaggle client) on top of it.
 
 ## Phase 1 — Data pipeline
 
@@ -339,6 +343,7 @@ cost for the selected subset only.
 ## Tests
 
 ```powershell
+pip install -r requirements-dev.txt   # testing / EDA / Kaggle extras
 python -m pytest tests/ -v
 ```
 

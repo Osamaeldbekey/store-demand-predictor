@@ -1,15 +1,36 @@
 # ===========================================================================
-# Store Demand Predictor — Pinned Dependency Set
-# Python 3.13.x (pins verified against a Python 3.13 environment; numpy>=2.1
-# and the wheels below are required for 3.13 compatibility)
+# Store Demand Predictor — Runtime Dependency Set
+# Python 3.11+ (developed and verified on 3.13.x).
+#
+# This is the *runtime* set: everything the deployed Streamlit app and the
+# src/ package need to serve forecasts. Testing, EDA and the Kaggle
+# data-acquisition client live in requirements-dev.txt.
+#
+# Compiled wheels are lower-bounded (>=) rather than pinned where an exact ==
+# pin would force a *source* build on a host whose interpreter differs from the
+# local one (Streamlit Community Cloud chooses its own Python):
+#
+#   pandas  >=2.2.3,<3   capped to the 2.x line — 3.0 is a breaking release this
+#                        code has not been validated against, and 2.3.x already
+#                        ships cp314 wheels, so the cap costs nothing.
+#   numpy   >=2.2.4,<3   2.4.0 is the first release with cp314 wheels; the old
+#                        ==2.2.4 pin was a source build on Python 3.14.
+#   pyarrow >=20.0.0     left open — any cap low enough to be "safe" (<22) would
+#                        pin it back to a build with no cp314 wheel.
+#
+# scipy and scikit-learn already ship cp314 wheels at their pinned versions; the
+# remaining pins are pure-Python or interpreter-agnostic wheels and stay exact
+# for reproducibility.
+#
 # Install:  pip install -r requirements.txt
 # Freeze:   pip freeze > requirements.txt   (after any change)
 # ===========================================================================
 
 # --- Data processing -------------------------------------------------------
-pandas==2.2.3
-numpy==2.2.4
-pyarrow==20.0.0
+# Wheel policy and per-package rationale: see the header comment.
+pandas>=2.2.3,<3
+numpy>=2.2.4,<3
+pyarrow>=20.0.0
 
 # --- Machine learning ------------------------------------------------------
 scikit-learn==1.8.0
@@ -21,11 +42,3 @@ joblib==1.5.3
 # --- Dashboard -------------------------------------------------------------
 streamlit==1.40.0
 plotly==5.24.1
-
-# --- Data acquisition ------------------------------------------------------
-kaggle==1.6.17
-
-# --- Development, testing & EDA --------------------------------------------
-pytest==8.3.3
-matplotlib==3.9.3
-seaborn==0.13.2

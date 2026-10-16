@@ -1,0 +1,24 @@
+# ===========================================================================
+# Store Demand Predictor — Development, EDA & Data-acquisition Extras
+# Python 3.11+ (developed and verified on 3.13.x).
+#
+# Everything here is needed to *build* the project — download the Kaggle data,
+# run the test suite, explore in notebooks — but not to *serve* the dashboard.
+# Keeping it out of requirements.txt keeps the deployed environment small and
+# removes two Python-version-sensitive entries from it: matplotlib 3.9.3 has no
+# cp314 wheel, and kaggle publishes an sdist only (no wheel at all).
+#
+# Install:  pip install -r requirements-dev.txt
+# ===========================================================================
+
+-r requirements.txt
+
+# --- Testing ---------------------------------------------------------------
+pytest==8.3.3
+
+# --- Data acquisition (Kaggle CLI + API) ------------------------------------
+kaggle==1.6.17
+
+# --- EDA notebooks ----------------------------------------------------------
+matplotlib==3.9.3
+seaborn==0.13.2
