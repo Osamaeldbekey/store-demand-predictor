@@ -281,7 +281,7 @@ forecasts with no Kaggle credentials and no Phase 1–3 run:
 | `models/lgbm_v1.joblib` | 8.1 MB | the trained global LightGBM (model, feature list, params, metrics) |
 | `data/processed/features.parquet` | 35.8 MB | the history every forecast rebuilds features from |
 | `data/processed/forecasts.parquet` | 142 KB | tier-1 batch: 520 series × 30 days |
-| `data/raw/holidays_events.csv` | 21.8 KB | the model reads 3 holiday features; without this file they zero out |
+| `data/raw/holidays_events.csv` | 22 KB | the model reads 3 holiday features; without this file they zero out |
 
 Only the bulky raw Kaggle download (`train.csv`, `oil.csv`, `stores.csv`, …)
 remains gitignored — it is needed to *retrain*, not to *serve*. The committed
@@ -309,7 +309,7 @@ Two deployment costs worth knowing:
 * A holidayless clone is not merely slower, it is **wrong**: with
   `holidays_events.csv` absent the 30-day forecast moves ~16% on a per-series
   basis (up to 50% on individual days) and **−17% in total volume** — enough to
-  corrupt every KPI. That is why the 21.8 KB file is committed.
+  corrupt every KPI. That is why the 22 KB file is committed.
 * Retraining invalidates the tier-1 batch; refresh it with
   `python -m src.models.forecast` (~7 minutes for the full scope).
 
@@ -326,10 +326,11 @@ tier 3 (direct subset computation).
 Measured on the real artifacts: the recursion costs **~0.72 s per series**, so a
 full-scope request needs **~6.3 minutes** — long enough that a hosted landing
 page would time out. With the committed tier-1 batch the same request is a mask
-over ~15.6k rows. Measured end-to-end on the real scope: **cold first paint
-3.05 s** (0.7 s to load the bundle, 2.4 s across forecast + history + inventory
-+ transfers + deadstock), then **~0.004 s** for every subsequent render. Narrow
-scopes (a handful of stores/families) were already fine without tier 1.
+over ~15.6k rows. Measured end-to-end on a fresh clone of the real scope:
+**cold first paint 2–3 s** (0.5–0.7 s to load the bundle, ~2 s across forecast +
+history + inventory + transfers + deadstock), then **~0.003 s** for every
+subsequent render. Narrow scopes (a handful of stores/families) were already
+fine without tier 1.
 
 A promotion scenario (`future_onpromotion`) intentionally bypasses tier 1: a
 precomputed batch cannot answer a what-if, so those requests pay the recursion
