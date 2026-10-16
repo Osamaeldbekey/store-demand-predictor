@@ -57,4 +57,6 @@ desktop.ini
 # ===========================================================================
 !models/lgbm_v1.joblib
 !data/processed/features.parquet
+!data/processed/forecasts.parquet
+!data/raw/holidays_events.csv
 

@@ -15,6 +15,9 @@ Run with:
 """
 from __future__ import annotations
 
+import logging
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -27,6 +30,7 @@ from src.features import build as fbuild
 from src.features import calendar, lags, split
 from src.models import build as mbuild
 from src.models import evaluate, predict, train, tune
+from src.models import forecast as mforecast
 
 # ---------------------------------------------------------------------------
 # Synthetic panel / feature fixtures
@@ -564,3 +568,205 @@ class TestBuild:
         text = train.artifact_summary(trained.to_artifact())
         assert "features" in text
         assert "trained_at" in text
+
+
+# ===========================================================================
+# forecast.py (the offline tier-1 batch)
+# ===========================================================================
+class TestForecastExport:
+    """Contract tests for the artifact ``app/_data.py`` tier 1 consumes."""
+
+    HORIZON = 6
+
+    @staticmethod
+    def _scope(frame: pd.DataFrame) -> tuple[list[int], list[str]]:
+        """Store/family lists the frame claims to cover."""
+        return (
+            sorted(int(v) for v in frame["store_nbr"].unique()),
+            sorted(str(v) for v in frame["family"].astype(str).unique()),
+        )
+
+    @pytest.fixture(scope="class")
+    def offline(
+        self, features: pd.DataFrame, trained: train.TrainingResult
+    ) -> pd.DataFrame:
+        return mforecast.build_offline_forecasts(
+            trained.model, features, horizon=self.HORIZON
+        )
+
+    def test_columns_are_exactly_what_the_dashboard_loader_expects(
+        self, offline: pd.DataFrame
+    ):
+        assert list(offline.columns) == mforecast.FORECAST_COLUMNS
+        assert set(mforecast.FORECAST_COLUMNS) == {
+            *config.GROUP_KEYS, config.DATE_COL, "prediction",
+        }
+
+    def test_every_series_is_covered_for_the_whole_horizon(
+        self, offline: pd.DataFrame, features: pd.DataFrame
+    ):
+        expected = features.groupby(config.GROUP_KEYS, observed=True).ngroups
+        counts = offline.groupby(config.GROUP_KEYS, observed=True)[
+            config.DATE_COL
+        ].nunique()
+        assert len(counts) == expected
+        assert counts.eq(self.HORIZON).all()
+        assert len(offline) == expected * self.HORIZON
+
+    def test_predictions_are_complete_and_plausible(self, offline: pd.DataFrame):
+        assert not offline.isna().any().any()
+        assert (offline["prediction"] >= 0).all()
+        assert (offline["prediction"] > 0).any()
+
+    def test_rows_are_sorted_by_series_then_date(self, offline: pd.DataFrame):
+        keys = [*config.GROUP_KEYS, config.DATE_COL]
+        expected = offline.sort_values(keys, kind="stable").reset_index(drop=True)
+        pd.testing.assert_frame_equal(offline, expected)
+
+    def test_batch_equals_the_library_call_it_wraps(
+        self, offline: pd.DataFrame, features: pd.DataFrame, trained
+    ):
+        """The exporter must not drift from `forecast_all`'s numbers."""
+        direct = predict.forecast_all(
+            trained.model, features, horizon=self.HORIZON, log_every=0
+        )
+        keys = [*config.GROUP_KEYS, config.DATE_COL]
+        merged = offline.merge(
+            direct[keys + ["prediction"]], on=keys, suffixes=("", "_direct")
+        )
+        assert len(merged) == len(offline)
+        assert np.allclose(
+            merged["prediction"], merged["prediction_direct"], rtol=1e-6, atol=1e-6
+        )
+
+    def test_scope_filters_narrow_the_batch(
+        self, features: pd.DataFrame, trained
+    ):
+        frame = mforecast.build_offline_forecasts(
+            trained.model, features, horizon=3, stores=[1], families=[FORECAST_FAMILY]
+        )
+        assert set(frame["store_nbr"].unique()) == {1}
+        assert set(frame["family"].astype(str).unique()) == {FORECAST_FAMILY}
+        assert len(frame) == 3
+
+    def test_round_trips_through_parquet_and_still_satisfies_tier_one(
+        self, offline: pd.DataFrame, tmp_path
+    ):
+        path = tmp_path / "forecasts.parquet"
+        offline.to_parquet(path, index=False)
+        reloaded = pd.read_parquet(path)
+        assert {*config.GROUP_KEYS, config.DATE_COL, "prediction"}.issubset(
+            reloaded.columns
+        )
+        stores, families = self._scope(reloaded)
+        mforecast.validate_offline_forecasts(reloaded, stores, families, self.HORIZON)
+
+    def test_rejects_an_empty_scope(self, features: pd.DataFrame, trained):
+        with pytest.raises(ValueError, match="No series matched"):
+            mforecast.build_offline_forecasts(
+                trained.model, features, horizon=3, families=["NOT_A_FAMILY"]
+            )
+
+    def test_rejects_a_non_positive_horizon(self, features: pd.DataFrame, trained):
+        with pytest.raises(ValueError, match="horizon must be"):
+            mforecast.build_offline_forecasts(trained.model, features, horizon=0)
+
+    def test_default_horizon_covers_every_configured_horizon(self):
+        assert mforecast.DEFAULT_HORIZON >= max(config.FORECAST_HORIZONS)
+        assert mforecast.DEFAULT_HORIZON >= config.FORECAST_HORIZON
+
+    # --- validate_offline_forecasts ------------------------------------
+    def test_validator_accepts_a_sound_artifact(self, offline: pd.DataFrame):
+        stores, families = self._scope(offline)
+        mforecast.validate_offline_forecasts(offline, stores, families, self.HORIZON)
+
+    def test_validator_rejects_missing_columns(self, offline: pd.DataFrame):
+        stores, families = self._scope(offline)
+        with pytest.raises(ValueError, match="missing columns"):
+            mforecast.validate_offline_forecasts(
+                offline.drop(columns=["prediction"]), stores, families, self.HORIZON
+            )
+
+    def test_validator_rejects_a_missing_series(self, offline: pd.DataFrame):
+        stores, families = self._scope(offline)
+        first = stores[0]
+        truncated = offline[offline["store_nbr"] != first]
+        with pytest.raises(ValueError, match="series in the artifact"):
+            mforecast.validate_offline_forecasts(
+                truncated, stores, families, self.HORIZON
+            )
+
+    def test_validator_rejects_a_short_series(self, offline: pd.DataFrame):
+        """A silently short batch would make tier 1 fall through to tier 3."""
+        stores, families = self._scope(offline)
+        short = offline[offline[config.DATE_COL] < offline[config.DATE_COL].max()]
+        with pytest.raises(ValueError, match="forecast days"):
+            mforecast.validate_offline_forecasts(short, stores, families, self.HORIZON)
+
+    def test_validator_rejects_null_predictions(self, offline: pd.DataFrame):
+        stores, families = self._scope(offline)
+        corrupted = offline.copy()
+        corrupted.loc[corrupted.index[0], "prediction"] = np.nan
+        with pytest.raises(ValueError, match="null predictions"):
+            mforecast.validate_offline_forecasts(
+                corrupted, stores, families, self.HORIZON
+            )
+
+    def test_missing_holiday_calendar_falls_back_to_empty(
+        self, tmp_path, caplog
+    ):
+        """The degraded-deploy case: no raw CSV shipped, so holidays are zeroed."""
+        with caplog.at_level(logging.WARNING):
+            table = mforecast.load_holidays(tmp_path / "absent.csv")
+        assert table.empty
+        assert list(table.columns) == list(calendar.empty_holidays().columns)
+        assert "holiday features" in caplog.text
+
+    def test_cli_writes_the_artifact(
+        self, features, trained, tmp_path, monkeypatch
+    ):
+        features_path = tmp_path / "features.parquet"
+        model_path = tmp_path / "lgbm_v1.joblib"
+        output_path = tmp_path / "forecasts.parquet"
+        features.to_parquet(features_path, index=False)
+        train.save_model(model_path, trained, extra={})
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "forecast",
+                "--features", str(features_path),
+                "--model", str(model_path),
+                "--output", str(output_path),
+                "--holidays", str(tmp_path / "absent.csv"),
+                "--horizon", "4",
+            ],
+        )
+        mforecast.main()
+
+        frame = pd.read_parquet(output_path)
+        assert {*config.GROUP_KEYS, config.DATE_COL, "prediction"}.issubset(
+            frame.columns
+        )
+        counts = frame.groupby(config.GROUP_KEYS, observed=True)[
+            config.DATE_COL
+        ].nunique()
+        assert counts.eq(4).all()
+        assert not frame.isna().any().any()
+
+    def test_cli_reports_missing_inputs(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "forecast",
+                "--features", str(tmp_path / "absent.parquet"),
+                "--model", str(tmp_path / "absent.joblib"),
+                "--output", str(tmp_path / "out.parquet"),
+            ],
+        )
+        with pytest.raises(FileNotFoundError, match="Phase 2"):
+            mforecast.main()

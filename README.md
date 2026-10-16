@@ -27,6 +27,11 @@ Expand-Archive data/raw/store-sales-time-series-forecasting.zip -DestinationPath
 Required files in `data/raw/`: `train.csv`, `stores.csv`, `holidays_events.csv`,
 `oil.csv`, `test.csv`, `sample_submission.csv`.
 
+`data/raw/` stays gitignored, with one deliberate exception:
+`holidays_events.csv` is committed, because the deployed model consumes three
+holiday features and forecasting without them is measurably biased (see
+*What is committed* below).
+
 ## Setup
 
 ```powershell
@@ -87,6 +92,9 @@ python -m src.models.build --tune --trials 50       # Optuna search before the f
 python -m src.models.build --refit-all              # deploy on 100% of the data
 python -m src.models.build --no-cv                  # skip cross-validation (faster)
 # -> models/lgbm_v1.joblib  and  models/test_predictions.parquet
+
+python -m src.models.forecast                       # pre-compute the offline forecast batch
+# -> data/processed/forecasts.parquet   (tier 1 of the dashboard's data layer)
 ```
 
 | Module | Responsibility |
@@ -95,6 +103,7 @@ python -m src.models.build --no-cv                  # skip cross-validation (fas
 | `tune.py` | Optuna (seeded TPE) over `num_leaves`, `learning_rate`, `feature_fraction`, `min_data_in_leaf`, `lambda_l1`, `lambda_l2`, `bagging_fraction`. Default objective is **WAPE**, not RMSE |
 | `evaluate.py` | RMSE / MAE / **WAPE** (headline) + bias, naive "last week repeat" baseline comparison, per-series diagnostics |
 | `predict.py` | Recursive multi-horizon forecasting (day-by-day feedback), batch `forecast_all`, horizon truncation |
+| `forecast.py` | CLI: batch every series for the dashboard's offline tier-1 artifact, with a contract check on the output |
 | `build.py` | CLI: walk-forward validation → optional tuning → final fit → sealed-test scoring → persist |
 
 Metrics are reported with **WAPE** first because it is scale-free and answers the
@@ -213,16 +222,21 @@ and the tests call these helpers directly.
 
 ### Demo mode
 
-The Kaggle artifacts are gitignored and there is no `kaggle.json` in this
-environment, so with `data/raw/` empty the dashboard **falls back to a
-deterministic synthetic panel** (3 stores × 6 families, 200 days, ending
-2017-08-15, seed `20240815`) pushed through the *real* Phase 2 feature builder
-and used to train a *real* (deliberately small) LightGBM. Every page therefore
-exercises the production code path, and a banner plus `is_demo` state plainly
-which path is live. The panel is seeded with a stalled family (TOYS), per-family
-stock-cover trios giving every active family both a donor and a receiver, and
-one genuine zero-stock position — so every page renders non-trivial results
-rather than empty states.
+Demo mode is a **fallback, not the default**. The deployable artifacts
+(`features.parquet`, `lgbm_v1.joblib`, `forecasts.parquet`) and the holiday
+calendar are committed — see *What is committed* below — so a fresh checkout
+boots straight into real mode. Demo mode engages only when the two required
+artifacts are absent, and `tests/conftest.py` pins it with `SDP_FORCE_DEMO=1`
+so the suite stays hermetic regardless of what a developer has on disk.
+
+It builds a **deterministic synthetic panel** (3 stores × 6 families, 200 days,
+ending 2017-08-15, seed `20240815`) pushed through the *real* Phase 2 feature
+builder and used to train a *real* (deliberately small) LightGBM. Every page
+therefore exercises the production code path, and a banner plus `is_demo` state
+plainly which path is live. The panel is seeded with a stalled family (TOYS),
+per-family stock-cover trios giving every active family both a donor and a
+receiver, and one genuine zero-stock position — so every page renders
+non-trivial results rather than empty states.
 
 Two disclosures are shown in the UI rather than buried here:
 
@@ -257,29 +271,69 @@ streamlit run app/main.py --server.port 8501
 invalid Streamlit API call or an empty-scope crash fails the build instead of
 the demo.
 
-For a real deployment, place `kaggle.json`, run the pipeline (Phases 1–3), and
-restart: `_data.py` detects `data/processed/features.parquet` together with
-`models/lgbm_v1.joblib` and switches off demo mode automatically, serving the
-trained artifacts with no code change. A `forecasts.parquet`, when present,
-additionally short-circuits the recursion. Kaggle credentials and the raw
-dataset are the only pieces missing in this environment, so the real-data path
-is wired but not yet executed end-to-end here.
+### What is committed
+
+The deployable artifacts ship with the repository, so a plain clone serves real
+forecasts with no Kaggle credentials and no Phase 1–3 run:
+
+| Path | Size | Why it ships |
+|---|---|---|
+| `models/lgbm_v1.joblib` | 8.1 MB | the trained global LightGBM (model, feature list, params, metrics) |
+| `data/processed/features.parquet` | 35.8 MB | the history every forecast rebuilds features from |
+| `data/processed/forecasts.parquet` | 142 KB | tier-1 batch: 520 series × 30 days |
+| `data/raw/holidays_events.csv` | 21.8 KB | the model reads 3 holiday features; without this file they zero out |
+
+Only the bulky raw Kaggle download (`train.csv`, `oil.csv`, `stores.csv`, …)
+remains gitignored — it is needed to *retrain*, not to *serve*. The committed
+`features.parquet` also carries the clean sales columns, so the loader falls
+back to it when `sales_clean.parquet` is absent.
+
+`_data.py` detects `features.parquet` together with `lgbm_v1.joblib` and
+switches off demo mode automatically, so deploying is `git clone` →
+`pip install -r requirements.txt` → `streamlit run app/main.py`.
+
+The Phase 1–3 pipeline **has** been executed end-to-end on the real Favorita
+data. Scores on the sealed test window (2017-07-31 → 2017-08-15, 8,320
+series-days never seen in training; training window 2013-01-01 → 2017-07-14):
+
+| Metric | LightGBM | Seasonal naive (last week) |
+|---|---|---|
+| **WAPE** (headline) | **10.5%** | 20.9% |
+| RMSE | 155.6 | 335.5 |
+| MAE | 54.1 | 108.0 |
+
+The model roughly halves the naive baseline's error on held-out days.
+
+Two deployment costs worth knowing:
+
+* A holidayless clone is not merely slower, it is **wrong**: with
+  `holidays_events.csv` absent the 30-day forecast moves ~16% on a per-series
+  basis (up to 50% on individual days) and **−17% in total volume** — enough to
+  corrupt every KPI. That is why the 21.8 KB file is committed.
+* Retraining invalidates the tier-1 batch; refresh it with
+  `python -m src.models.forecast` (~7 minutes for the full scope).
 
 ### Real-scope performance
 
 The three-tier forecast resolution is what keeps the UI responsive, and the
-tier that carries full scale is **tier 1**: a precomputed
-`data/processed/forecasts.parquet`. The canonical-recursion tier is capped at
-`CANONICAL_MAX_SERIES = 60` series, which fits the 18-series demo corpus but not
-the ~560-series real scope — there, requests fall through to tier 3 (direct
-subset computation) and a full-scope recursion costs minutes rather than
-seconds. Narrow scopes (a handful of stores/families) are unaffected.
+tier that carries full scale is **tier 1**: the precomputed
+`data/processed/forecasts.parquet` written by `python -m src.models.forecast`.
+The canonical-recursion tier is capped at `CANONICAL_MAX_SERIES = 60` series,
+which fits the 18-series demo corpus but not the real scope
+(20 stores × 26 families = **520 series**), where requests fall through to
+tier 3 (direct subset computation).
 
-Worth knowing: **no `src/` entry point writes `forecasts.parquet` yet**, so on a
-real-data checkout the full-scope pages (the landing page, or selecting
-everything) are slow on first load. Either fix is small — write the artifact
-from `model_predict.forecast_all(...)`, or raise `CANONICAL_MAX_SERIES` so the
-whole scope is recursed once and every later request is a slice.
+Measured on the real artifacts: the recursion costs **~0.72 s per series**, so a
+full-scope request needs **~6.3 minutes** — long enough that a hosted landing
+page would time out. With the committed tier-1 batch the same request is a mask
+over ~15.6k rows. Measured end-to-end on the real scope: **cold first paint
+3.05 s** (0.7 s to load the bundle, 2.4 s across forecast + history + inventory
++ transfers + deadstock), then **~0.004 s** for every subsequent render. Narrow
+scopes (a handful of stores/families) were already fine without tier 1.
+
+A promotion scenario (`future_onpromotion`) intentionally bypasses tier 1: a
+precomputed batch cannot answer a what-if, so those requests pay the recursion
+cost for the selected subset only.
 
 ## Tests
 
@@ -321,8 +375,8 @@ python -m pytest tests/test_app.py -v
 ```
 
 Because the data layer is process-cached, the expensive forecast is built once
-and the entire suite runs in ~45 s. Current totals: **251 tests** (8 cleaning,
-31 features, 43 models, 128 engines, 41 dashboard).
+and the entire suite runs in ~45 s. Current totals: **269 tests** (8 cleaning,
+31 features, 61 models, 128 engines, 41 dashboard).
 
 The dashboard suite is **hermetic**: `tests/conftest.py` exports
 `SDP_FORCE_DEMO=1`, which pins `app/_data.py` to the synthetic corpus even when
