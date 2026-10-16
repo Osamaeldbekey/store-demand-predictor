@@ -1,0 +1,51 @@
+# ===========================================================================
+# Data & trained artifacts — large, regenerable, never committed
+# ===========================================================================
+data/raw/*
+data/processed/*
+models/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!models/.gitkeep
+
+# ===========================================================================
+# Python
+# ===========================================================================
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# ===========================================================================
+# Notebooks & environments
+# ===========================================================================
+.ipynb_checkpoints/
+.env
+.env.*
+!.env.example
+
+# ===========================================================================
+# IDEs & OS
+# ===========================================================================
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ===========================================================================
+# Safety net — artifact file types wherever they are written
+# (the Kaggle zip, parquet/features caches, pickled models)
+# ===========================================================================
+*.joblib
+*.parquet
+*.zip
+
